@@ -1,5 +1,16 @@
 controls_node:
   ros__parameters:
-    max_speed: 5.0
+    # Vehicle
+    wheelbase: 0.3302
+
+    # Pure pursuit
+    lookahead_gain: 0.5
+    min_lookahead: 0.5
+    max_lookahead: 3.0
+
+    # Limits
     max_steering_angle: 0.4189
+    max_speed: 10.0
+
+    # Control loop
     control_frequency: 50.0

@@ -15,7 +15,7 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'scipy', 'scikit-image', 'Pillow', 'pyyaml', 'numpy'],
     zip_safe=True,
     maintainer='samlee',
     maintainer_email='samlee@todo.todo',
