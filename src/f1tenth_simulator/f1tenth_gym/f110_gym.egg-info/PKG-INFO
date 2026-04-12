@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: f110_gym
+Version: 0.2.1
+Home-page: https://f1tenth.org
+Author: Hongrui Zheng
+Author-email: billyzheng.bz@gmail.com
+License-File: LICENSE
+Requires-Dist: gym==0.19.0
+Requires-Dist: numpy~=1.26.0
+Requires-Dist: Pillow>=9.0.1
+Requires-Dist: scipy>=1.7.3
+Requires-Dist: numba>=0.55.2
+Requires-Dist: pyyaml>=5.3.1
+Requires-Dist: pyglet<1.5
+Requires-Dist: pyopengl
+Dynamic: author
+Dynamic: author-email
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: requires-dist
