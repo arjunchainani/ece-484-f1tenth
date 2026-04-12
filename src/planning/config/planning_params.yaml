@@ -1,0 +1,5 @@
+planning_node:
+  ros__parameters:
+    planning_frequency: 20.0
+    lookahead_distance: 1.5
+    waypoint_spacing: 0.5
