@@ -1,6 +1,7 @@
 import os
 import math
 import copy
+import threading
 
 import numpy as np
 import rclpy
@@ -47,19 +48,13 @@ class PlanningNode(Node):
         sy = self.get_parameter('sy').value
         stheta = self.get_parameter('stheta').value
 
-        # Resolve map path
-        map_name = self.get_parameter('map_path').value
-        map_yaml = self._resolve_map_path(map_name)
+        self.spacing = spacing
 
-        # Generate the minimum curvature raceline
-        self.get_logger().info(f'Generating raceline for map: {map_name}...')
-        self.raceline, self.centerline, self.w_left, self.w_right = generate_raceline(
-            map_yaml, sx, sy, stheta, vehicle_width, spacing
-        )
-        self.get_logger().info(
-            f'Raceline generated: {len(self.raceline)} waypoints, '
-            f'track length ~{len(self.raceline) * spacing:.1f}m'
-        )
+        # Raceline state — populated asynchronously
+        self.raceline = None
+        self.centerline = None
+        self.w_left = None
+        self.w_right = None
 
         # Waypoint tracking state
         self.current_wp_idx = 0
@@ -81,7 +76,38 @@ class PlanningNode(Node):
         freq = self.get_parameter('planning_frequency').value
         self.plan_timer = self.create_timer(1.0 / freq, self.plan_callback)
 
-        self.get_logger().info('Planning node initialized')
+        # Kick off raceline generation on a background thread so __init__
+        # returns immediately and the publisher/timer are live.
+        map_name = self.get_parameter('map_path').value
+        map_yaml = self._resolve_map_path(map_name)
+        self.get_logger().info(
+            f'Planning node initialized; generating raceline for map: {map_name} in background...'
+        )
+        self._raceline_thread = threading.Thread(
+            target=self._generate_raceline_async,
+            args=(map_yaml, sx, sy, stheta, vehicle_width, spacing),
+            daemon=True,
+        )
+        self._raceline_thread.start()
+
+    def _generate_raceline_async(self, map_yaml, sx, sy, stheta, vehicle_width, spacing):
+        try:
+            raceline, centerline, w_left, w_right = generate_raceline(
+                map_yaml, sx, sy, stheta, vehicle_width, spacing
+            )
+        except Exception as e:
+            self.get_logger().error(f'Raceline generation failed: {e}')
+            return
+
+        self.centerline = centerline
+        self.w_left = w_left
+        self.w_right = w_right
+        # Assign raceline last — plan_callback gates on this field.
+        self.raceline = raceline
+        self.get_logger().info(
+            f'Raceline generated: {len(raceline)} waypoints, '
+            f'track length ~{len(raceline) * spacing:.1f}m'
+        )
 
     def _resolve_map_path(self, map_name):
         """Resolve map name to the full YAML path."""
@@ -247,7 +273,7 @@ class PlanningNode(Node):
         return velocities
 
     def plan_callback(self):
-        if self.current_odom is None:
+        if self.current_odom is None or self.raceline is None:
             return
 
         curr_x, curr_y, curr_yaw, curr_vel = self._extract_state()

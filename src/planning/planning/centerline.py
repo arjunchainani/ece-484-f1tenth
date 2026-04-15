@@ -4,6 +4,7 @@ import yaml
 from PIL import Image
 from scipy import ndimage
 from scipy.interpolate import splprep, splev
+from skimage.morphology import skeletonize as _sk_skeletonize
 
 
 def load_map(yaml_path):
@@ -53,34 +54,8 @@ def world_to_pixel(points, origin, resolution, img_height):
 
 
 def _skeletonize(mask):
-    """Morphological thinning to single-pixel skeleton using hit-or-miss."""
-    skeleton = mask.copy().astype(np.uint8)
-
-    # Zhang-Suen thinning structuring elements
-    B1 = np.array([[0, 0, 0], [2, 1, 2], [1, 1, 1]], dtype=np.int8)
-    B2 = np.array([[2, 0, 0], [1, 1, 0], [1, 1, 2]], dtype=np.int8)
-
-    def _rotate90(b):
-        return np.rot90(b, k=-1)
-
-    elements = []
-    for b in [B1, B2]:
-        for _ in range(4):
-            elements.append(b.copy())
-            b = _rotate90(b)
-
-    changed = True
-    while changed:
-        changed = False
-        for elem in elements:
-            fg = (elem == 1).astype(np.uint8)
-            bg = (elem == 0).astype(np.uint8)
-            hit = ndimage.binary_hit_or_miss(skeleton, fg, bg)
-            if np.any(hit):
-                skeleton[hit] = 0
-                changed = True
-
-    return skeleton.astype(bool)
+    """Morphological thinning to a single-pixel skeleton."""
+    return _sk_skeletonize(mask.astype(bool))
 
 
 def _prune_branches(skeleton):
