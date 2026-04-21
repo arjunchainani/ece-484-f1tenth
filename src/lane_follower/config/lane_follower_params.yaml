@@ -27,7 +27,7 @@ lane_follower_node:
     # Output limits — eoh used max_steer 0.4, speed_gain 2, max_speed 1.0
     max_steering_angle: 0.4
     speed_gain: 2.0
-    max_speed: 1.0
+    max_speed: 2.0
     default_wall_dist: 2.0
 
     # ----- advanced (fit-based) augmentation ------------------------------
@@ -54,11 +54,11 @@ lane_follower_node:
     b_stability_thresh: 1.0
 
     # Heading feedforward — bounded perturbation, NOT primary steering
-    heading_gain: 0.15
-    heading_ff_clamp: 0.12  # rad ≈ 0.3 * max_steer
+    heading_gain: 0.25
+    heading_ff_clamp: 0.25  # rad ≈ 0.3 * max_steer
 
     # Curvature speed cap (Pass 2 — placeholder defaults)
-    lateral_accel_limit: 2.0
+    lateral_accel_limit: 4.5
 
     # Time-constant EMA (Pass 2 — disabled when tau == 0)
     steer_tau: 0.0
