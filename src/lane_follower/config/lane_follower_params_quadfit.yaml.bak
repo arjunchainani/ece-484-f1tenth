@@ -1,0 +1,72 @@
+lane_follower_node:
+  ros__parameters:
+    # Topics
+    scan_topic: /ego_racecar/scan
+    drive_topic: /ego_racecar/drive
+    joy_topic: /joy
+    viz_topic: /lane_follower/viz
+    viz_frame: ego_racecar/laser
+    publish_viz: true
+
+    # Enable
+    enable_on_startup: true
+    joy_enable_button: 3  # Xbox "Y"
+
+    # Wide sector — used only for the quadratic fit (heading feedforward
+    # and curvature cap). PID lateral error comes from perp_* below, not
+    # from this fit, so noise here can't steer us into a wall.
+    left_min_deg: 60.0
+    left_max_deg: 110.0
+    right_min_deg: -110.0
+    right_max_deg: -60.0
+
+    # Narrow perpendicular window (degrees, symmetric around ±90°).
+    # Mean range over these rays is the eoh-style robust lateral distance
+    # used for the PID.
+    perp_center_deg: 90.0
+    perp_half_width_deg: 10.0
+
+    # Point filtering
+    max_range: 10.0
+    outlier_mad_k: 2.5
+    min_points_for_fit: 10
+
+    # PID on (d_left - d_right). kp pulled further down (was still
+    # overshooting), kd pushed up for damping, integrator still off.
+    kp: 0.25
+    ki: 0.0
+    kd: 0.55
+    integral_clamp: 10.0
+
+    # Feedforward on average wall tangent at x=0. Conservative because
+    # the fit's b coefficient can still be noisy at corner entry; the
+    # PID now gets its lateral error from perpendicular rays (robust),
+    # so heading_gain is a pure anticipatory bonus and can be small.
+    heading_gain: 0.6
+
+    # Steering / speed
+    # max_steering_angle: 0.4189
+    max_steering_angle: 0.6
+    forward_cone_half_deg: 10.0
+
+    # Speed target comes from the min of three sources:
+    # - forward clearance * speed_gain
+    # - curvature-based lateral-accel limit: sqrt(a_lat_limit / |kappa|)
+    # - max_speed
+    # then multiplied by (1 - speed_steer_penalty * |steer|/max_steer),
+    # then low-passed. lateral_accel_limit dropped hard because the 0.7 m
+    # centerline radii mean kappa ~= 1.4 — at 2.0 m/s² we'd enter corners
+    # at nearly 1.2 m/s, which didn't leave the Ackermann steering enough
+    # headroom. 1.0 m/s² caps corner entry around 0.85 m/s.
+    speed_gain: 0.5
+    min_speed: 0.2
+    max_speed: 0.25
+    speed_steer_penalty: 0.85
+    lateral_accel_limit: 0.4
+
+    # EMAs run at the SIM scan rate, which is 250 Hz (f1tenth_gym ticks
+    # scans every 4 ms). The prior alphas (0.25, 0.3) gave ~12 ms time
+    # constants at that rate — effectively pass-through. These values
+    # give ~0.13 s (speed) and ~0.07 s (steering) time constants.
+    speed_smoothing_alpha: 0.03
+    steering_smoothing_alpha: 0.06

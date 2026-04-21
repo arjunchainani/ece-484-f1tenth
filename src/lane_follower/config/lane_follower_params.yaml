@@ -1,0 +1,31 @@
+lane_follower_node:
+  ros__parameters:
+    # Topics
+    scan_topic: /ego_racecar/scan
+    drive_topic: /ego_racecar/drive
+    joy_topic: /joy
+    viz_topic: /lane_follower/viz
+    viz_frame: ego_racecar/laser
+    publish_viz: true
+
+    # Enable
+    enable_on_startup: true
+    joy_enable_button: 3  # Xbox "Y"
+
+    # eoh window angles + width
+    left_angle_deg: 60.0
+    right_angle_deg: -60.0
+    window_half_size: 5
+    forward_cone_half_deg: 10.0
+
+    # eoh PID gains (verbatim from real-car implementation)
+    kp: 0.6
+    ki: 0.005
+    kd: 0.2
+    integral_clamp: 20.0
+
+    # Output limits — eoh used max_steer 0.4, speed_gain 2, max_speed 1.0
+    max_steering_angle: 0.4
+    speed_gain: 2.0
+    max_speed: 1.0
+    default_wall_dist: 2.0
