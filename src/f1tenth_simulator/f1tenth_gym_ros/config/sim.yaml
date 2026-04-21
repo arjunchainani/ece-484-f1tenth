@@ -42,17 +42,17 @@ bridge:
     scan_beams: 1080
 
     # map parameters (path will be resolved relative to package share directory)
-    # Available: 'square', 'levine', 'Spielberg_map', 'oval', 'curvy', 'circuit', 'hairpin'
-    map_path: 'hairpin'
+    # Available: 'square', 'levine', 'Spielberg_map', 'oval', 'curvy', 'circuit', 'hairpin', 'snake'
+    map_path: 'snake'
     map_img_ext: '.png'
 
     # opponent parameters
     num_agent: 1
 
     # ego starting pose on map
-    sx: 0.0
-    sy: -0.9
-    stheta: 0.0    # mid bottom straight, facing along track (hairpin map)
+    sx: -1.85
+    sy: 0.0
+    stheta: -1.5708    # mid left-side straight, facing south into bottom-left corner (snake map)
 
     # opp starting pose on map
     sx1: 2.0
