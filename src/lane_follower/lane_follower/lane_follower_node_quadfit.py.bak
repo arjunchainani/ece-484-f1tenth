@@ -1,0 +1,481 @@
+"""Reactive lane-following controller for F1Tenth.
+
+Fits a quadratic curve to each side wall from LIDAR points in the vehicle
+frame, then runs a PID on (d_left - d_right) with an additive wall-heading
+alignment term that reads the local tangent of the fitted walls. Speed
+scales with forward clearance and decays when commanded steering is large.
+
+Vehicle frame: +x forward, +y left. LIDAR angle 0 = forward, positive = CCW.
+"""
+
+import math
+
+import numpy as np
+import rclpy
+from rclpy.node import Node
+
+from sensor_msgs.msg import LaserScan, Joy
+from ackermann_msgs.msg import AckermannDriveStamped
+from visualization_msgs.msg import Marker, MarkerArray
+from geometry_msgs.msg import Point
+from std_msgs.msg import ColorRGBA
+
+
+class LaneFollowerNode(Node):
+    def __init__(self):
+        super().__init__('lane_follower_node')
+
+        # --- Parameters ---
+        self.declare_parameter('scan_topic', '/ego_racecar/scan')
+        self.declare_parameter('drive_topic', '/ego_racecar/drive')
+        self.declare_parameter('joy_topic', '/joy')
+        self.declare_parameter('viz_topic', '/lane_follower/viz')
+        self.declare_parameter('viz_frame', 'ego_racecar/laser')
+        self.declare_parameter('publish_viz', True)
+        self.declare_parameter('enable_on_startup', True)
+        self.declare_parameter('joy_enable_button', 3)  # "Y" on Xbox pad
+
+        # Wide sector — used for the quadratic fit (heading feedforward +
+        # curvature). Sign convention: +deg is left of forward.
+        self.declare_parameter('left_min_deg', 30.0)
+        self.declare_parameter('left_max_deg', 120.0)
+        self.declare_parameter('right_min_deg', -120.0)
+        self.declare_parameter('right_max_deg', -30.0)
+
+        # Narrow perpendicular window — used for the ROBUST lateral-distance
+        # signal that drives the PID. Mean range over these rays is what
+        # the eoh reference controller used on the real car; it doesn't
+        # extrapolate and so doesn't blow up the way the fit does at
+        # corner entry.
+        self.declare_parameter('perp_center_deg', 90.0)
+        self.declare_parameter('perp_half_width_deg', 10.0)
+
+        # Point filtering
+        self.declare_parameter('max_range', 10.0)
+        self.declare_parameter('outlier_mad_k', 2.5)
+        self.declare_parameter('min_points_for_fit', 10)
+
+        # PID on lateral error
+        self.declare_parameter('kp', 0.6)
+        self.declare_parameter('ki', 0.005)
+        self.declare_parameter('kd', 0.2)
+        self.declare_parameter('integral_clamp', 20.0)
+
+        # Wall-heading feedforward (tangent slope at x=0)
+        self.declare_parameter('heading_gain', 0.3)
+
+        # Steering / speed limits
+        self.declare_parameter('max_steering_angle', 0.4189)
+        self.declare_parameter('forward_cone_half_deg', 10.0)
+        self.declare_parameter('speed_gain', 1.5)
+        self.declare_parameter('min_speed', 0.5)
+        self.declare_parameter('max_speed', 1.8)
+        self.declare_parameter('speed_steer_penalty', 0.7)
+        self.declare_parameter('lateral_accel_limit', 2.0)
+        self.declare_parameter('speed_smoothing_alpha', 0.25)
+        self.declare_parameter('steering_smoothing_alpha', 0.3)
+
+        # Snapshot params
+        self.scan_topic = self.get_parameter('scan_topic').value
+        self.drive_topic = self.get_parameter('drive_topic').value
+        self.joy_topic = self.get_parameter('joy_topic').value
+        self.viz_topic = self.get_parameter('viz_topic').value
+        self.viz_frame = self.get_parameter('viz_frame').value
+        self.publish_viz = bool(self.get_parameter('publish_viz').value)
+        self.enabled = bool(self.get_parameter('enable_on_startup').value)
+        self.joy_enable_button = int(self.get_parameter('joy_enable_button').value)
+
+        self.left_min = math.radians(self.get_parameter('left_min_deg').value)
+        self.left_max = math.radians(self.get_parameter('left_max_deg').value)
+        self.right_min = math.radians(self.get_parameter('right_min_deg').value)
+        self.right_max = math.radians(self.get_parameter('right_max_deg').value)
+
+        perp_center = math.radians(
+            self.get_parameter('perp_center_deg').value)
+        perp_half = math.radians(
+            self.get_parameter('perp_half_width_deg').value)
+        self.perp_left_min = perp_center - perp_half
+        self.perp_left_max = perp_center + perp_half
+        self.perp_right_min = -perp_center - perp_half
+        self.perp_right_max = -perp_center + perp_half
+
+        self.max_range = float(self.get_parameter('max_range').value)
+        self.outlier_mad_k = float(self.get_parameter('outlier_mad_k').value)
+        self.min_pts = int(self.get_parameter('min_points_for_fit').value)
+
+        self.kp = float(self.get_parameter('kp').value)
+        self.ki = float(self.get_parameter('ki').value)
+        self.kd = float(self.get_parameter('kd').value)
+        self.integral_clamp = float(self.get_parameter('integral_clamp').value)
+        self.heading_gain = float(self.get_parameter('heading_gain').value)
+
+        self.max_steer = float(self.get_parameter('max_steering_angle').value)
+        self.forward_cone_half = math.radians(
+            self.get_parameter('forward_cone_half_deg').value)
+        self.speed_gain = float(self.get_parameter('speed_gain').value)
+        self.min_speed = float(self.get_parameter('min_speed').value)
+        self.max_speed = float(self.get_parameter('max_speed').value)
+        self.speed_steer_penalty = float(
+            self.get_parameter('speed_steer_penalty').value)
+        self.lateral_accel_limit = float(
+            self.get_parameter('lateral_accel_limit').value)
+        self.speed_smoothing_alpha = float(
+            self.get_parameter('speed_smoothing_alpha').value)
+        self.steering_smoothing_alpha = float(
+            self.get_parameter('steering_smoothing_alpha').value)
+
+        # --- PID state ---
+        self.prev_error = 0.0
+        self.integral_error = 0.0
+
+        # --- Output-filter state ---
+        self.smoothed_speed = self.min_speed
+        self.smoothed_steer = 0.0
+
+        # --- Diagnostics ---
+        self._scan_count = 0
+        self._published_once = False
+
+        # --- I/O ---
+        self.scan_sub = self.create_subscription(
+            LaserScan, self.scan_topic, self.scan_callback, 10)
+        self.joy_sub = self.create_subscription(
+            Joy, self.joy_topic, self.joy_callback, 10)
+        self.drive_pub = self.create_publisher(
+            AckermannDriveStamped, self.drive_topic, 10)
+        self.viz_pub = self.create_publisher(
+            MarkerArray, self.viz_topic, 10)
+
+        self.get_logger().info(
+            f'lane_follower_node up (enabled={self.enabled}, '
+            f'scan={self.scan_topic}, drive={self.drive_topic})'
+        )
+
+    # ------------------------------------------------------------------
+
+    def joy_callback(self, msg):
+        if len(msg.buttons) > self.joy_enable_button:
+            new_state = (msg.buttons[self.joy_enable_button] == 1)
+            if new_state and not self.enabled:
+                self.get_logger().info('lane_follower enabled via joy')
+            elif not new_state and self.enabled:
+                self.get_logger().info('lane_follower disabled via joy')
+                self.integral_error = 0.0
+            self.enabled = new_state
+
+    # ------------------------------------------------------------------
+
+    def _fit_wall(self, xs, ys):
+        """Fit y = a x^2 + b x + c with MAD outlier rejection.
+
+        Returns ((a, b, c), xs_kept, ys_kept) or None if there are too few
+        points or the fit fails numerically.
+        """
+        if xs.size < self.min_pts:
+            return None
+
+        # MAD outlier reject on range (robust to single spikes).
+        r = np.hypot(xs, ys)
+        med = np.median(r)
+        mad = np.median(np.abs(r - med)) + 1e-6
+        keep = np.abs(r - med) < self.outlier_mad_k * mad
+        xs, ys = xs[keep], ys[keep]
+
+        if xs.size < self.min_pts:
+            return None
+
+        try:
+            a, b, c = np.polyfit(xs, ys, 2)
+        except (np.linalg.LinAlgError, ValueError):
+            return None
+        if not (math.isfinite(a) and math.isfinite(b) and math.isfinite(c)):
+            return None
+        # Reject numerically-ill-conditioned fits. |a| > 20 means radius
+        # of curvature < 2.5 cm, which is never a real wall — it's the
+        # quadratic overreacting to sparse forward-only data.
+        if abs(a) > 20.0 or abs(b) > 10.0:
+            return None
+        return (float(a), float(b), float(c)), xs, ys
+
+    def _compute_forward_clearance(self, ranges, angles):
+        mask = (
+            np.isfinite(ranges)
+            & (ranges > 0.0)
+            & (np.abs(angles) <= self.forward_cone_half)
+        )
+        valid = ranges[mask]
+        if valid.size == 0:
+            return self.max_range
+        return float(np.min(valid))
+
+    # ------------------------------------------------------------------
+
+    def scan_callback(self, msg):
+        self._scan_count += 1
+        if self._scan_count == 1:
+            self.get_logger().info(
+                f'first scan: n={len(msg.ranges)}, '
+                f'angle_min={msg.angle_min:.3f}, angle_max={msg.angle_max:.3f}'
+            )
+        if not self.enabled:
+            return
+
+        ranges = np.asarray(msg.ranges, dtype=np.float64)
+        n = ranges.size
+        if n == 0:
+            return
+
+        angles = msg.angle_min + np.arange(n) * msg.angle_increment
+
+        valid = np.isfinite(ranges) & (ranges > 0.0) & (ranges < self.max_range)
+        xs_all = ranges * np.cos(angles)
+        ys_all = ranges * np.sin(angles)
+
+        left_mask = valid & (angles >= self.left_min) & (angles <= self.left_max)
+        right_mask = valid & (angles >= self.right_min) & (angles <= self.right_max)
+
+        left_fit = self._fit_wall(xs_all[left_mask], ys_all[left_mask])
+        right_fit = self._fit_wall(xs_all[right_mask], ys_all[right_mask])
+
+        # Lateral distances from the NARROW perpendicular window. Use the
+        # MIN range in the window, not the mean — at corner entry some
+        # rays catch the local wall (close) while others slip past it
+        # into the post-corner region (far), and the mean shoots up.
+        # The min always reports the closest wall on that side, which is
+        # what we actually need for lane centering.
+        def _perp_min(low, high):
+            m = (np.isfinite(ranges) & (ranges > 0.0)
+                 & (ranges < self.max_range)
+                 & (angles >= low) & (angles <= high))
+            vals = ranges[m]
+            return float(np.min(vals)) if vals.size >= 3 else None
+
+        d_left = _perp_min(self.perp_left_min, self.perp_left_max)
+        d_right = _perp_min(self.perp_right_min, self.perp_right_max)
+
+        if d_left is None and d_right is None:
+            self.get_logger().warn('perp windows empty both sides — skipping')
+            return
+        if d_left is None:
+            d_left = d_right
+        if d_right is None:
+            d_right = d_left
+
+        # b/a from the wide-sector fit are used ONLY for the heading
+        # feedforward and the curvature speed cap. If a side's fit fails
+        # or looks suspicious, zero the contribution from that side
+        # rather than letting it steer us into a wall.
+        b_left = left_fit[0][1] if left_fit is not None else 0.0
+        b_right = right_fit[0][1] if right_fit is not None else 0.0
+
+        # Lateral error — positive means we're closer to the right wall, so
+        # we want a positive (left) steering response.
+        error = d_left - d_right
+
+        # PID
+        p = self.kp * error
+        self.integral_error += error
+        self.integral_error = float(np.clip(
+            self.integral_error, -self.integral_clamp, self.integral_clamp))
+        i = self.ki * self.integral_error
+        d = self.kd * (error - self.prev_error)
+        self.prev_error = error
+
+        # Wall-heading feedforward: the average local tangent of the two
+        # walls is the direction the lane is curving. Positive slope = lane
+        # bends left, so add to steering.
+        heading_ff = self.heading_gain * 0.5 * (b_left + b_right)
+
+        raw_steer = float(np.clip(p + i + d + heading_ff,
+                                  -self.max_steer, self.max_steer))
+        # Low-pass the final steering command. The narrow 30..90° sector
+        # means the quadratic fit's 'b' coefficient is computed from a
+        # forward-leaning strip of points that can shift set-membership
+        # between scans (outlier reject, sector edge), causing frame-to-
+        # frame jumps in b. heading_gain amplifies those; the EMA below
+        # keeps the wheels from teleporting.
+        self.smoothed_steer = (
+            self.steering_smoothing_alpha * raw_steer
+            + (1.0 - self.steering_smoothing_alpha) * self.smoothed_steer
+        )
+        steer = float(self.smoothed_steer)
+
+        # Speed — three caps plus a steer penalty, then low-pass filter so
+        # corner exits don't throttle-spike into the next brake zone.
+        front_dist = self._compute_forward_clearance(ranges, angles)
+        v_clearance = front_dist * self.speed_gain
+
+        # Lane curvature at x=0: kappa = 2*a_center / (1 + b_center^2)^1.5,
+        # where a_center = (a_l + a_r)/2 and b_center = (b_l + b_r)/2. Only
+        # trusted when BOTH walls were actually fit (not mirrored).
+        if left_fit is not None and right_fit is not None:
+            a_l, _, _ = left_fit[0]
+            a_r, _, _ = right_fit[0]
+            a_center = 0.5 * (a_l + a_r)
+            b_center = 0.5 * (b_left + b_right)
+            kappa = abs(2.0 * a_center / (1.0 + b_center * b_center) ** 1.5)
+        else:
+            kappa = 0.0
+
+        if kappa > 1e-3:
+            v_curvature = math.sqrt(self.lateral_accel_limit / kappa)
+        else:
+            v_curvature = self.max_speed
+
+        v_target = min(v_clearance, v_curvature, self.max_speed)
+        v_target *= max(0.0, 1.0 - self.speed_steer_penalty
+                        * abs(steer) / self.max_steer)
+        v_target = max(self.min_speed, v_target)
+
+        self.smoothed_speed = (
+            self.speed_smoothing_alpha * v_target
+            + (1.0 - self.speed_smoothing_alpha) * self.smoothed_speed
+        )
+        speed = float(self.smoothed_speed)
+
+        drive = AckermannDriveStamped()
+        drive.header.stamp = self.get_clock().now().to_msg()
+        drive.header.frame_id = 'base_link'
+        drive.drive.speed = speed
+        drive.drive.steering_angle = steer
+        self.drive_pub.publish(drive)
+
+        if not self._published_once:
+            self._published_once = True
+            self.get_logger().info(
+                f'first drive published: speed={speed:.2f}, steer={steer:.3f}'
+            )
+        # Throttled status — one line every ~2s at 40Hz scans.
+        if self._scan_count % 80 == 0:
+            self.get_logger().info(
+                f'd_left={d_left:.2f}  d_right={d_right:.2f}  '
+                f'err={error:+.2f}  steer={steer:+.3f}  speed={speed:.2f}  '
+                f'front={front_dist:.2f}  kappa={kappa:.3f}  '
+                f'v_curv={v_curvature:.2f}'
+            )
+
+        if self.publish_viz:
+            self._publish_viz(msg.header.stamp, left_fit, right_fit)
+
+    # ------------------------------------------------------------------
+
+    def _publish_viz(self, stamp, left_fit, right_fit):
+        """Publish points/curves/centerline as RViz MarkerArray.
+
+        Markers live in the LIDAR frame (viz_frame), so they ride with the
+        vehicle. IDs are fixed so each scan replaces the previous render.
+        """
+        arr = MarkerArray()
+
+        def header():
+            m = Marker()
+            m.header.frame_id = self.viz_frame
+            m.header.stamp = stamp
+            m.action = Marker.ADD
+            return m
+
+        def points_marker(mid, color, xs, ys):
+            m = header()
+            m.ns = 'lane_follower'
+            m.id = mid
+            m.type = Marker.POINTS
+            m.scale.x = 0.05
+            m.scale.y = 0.05
+            m.color = color
+            m.points = [Point(x=float(x), y=float(y), z=0.0)
+                        for x, y in zip(xs, ys)]
+            return m
+
+        def curve_marker(mid, color, coef, xs_range):
+            a, b, c = coef
+            xs = np.linspace(xs_range[0], xs_range[1], 40)
+            ys = a * xs * xs + b * xs + c
+            m = header()
+            m.ns = 'lane_follower'
+            m.id = mid
+            m.type = Marker.LINE_STRIP
+            m.scale.x = 0.03
+            m.color = color
+            m.points = [Point(x=float(x), y=float(y), z=0.0)
+                        for x, y in zip(xs, ys)]
+            return m
+
+        def delete_marker(mid):
+            m = header()
+            m.ns = 'lane_follower'
+            m.id = mid
+            m.action = Marker.DELETE
+            return m
+
+        green = ColorRGBA(r=0.1, g=0.9, b=0.2, a=1.0)
+        red = ColorRGBA(r=0.95, g=0.2, b=0.2, a=1.0)
+        blue = ColorRGBA(r=0.2, g=0.5, b=1.0, a=1.0)
+
+        # IDs: 0=L pts, 1=R pts, 2=L curve, 3=R curve, 4=centerline
+        if left_fit is not None:
+            coef_l, xs_l, ys_l = left_fit
+            arr.markers.append(points_marker(0, green, xs_l, ys_l))
+            arr.markers.append(curve_marker(
+                2, green, coef_l, (float(xs_l.min()), float(xs_l.max()))))
+        else:
+            arr.markers.append(delete_marker(0))
+            arr.markers.append(delete_marker(2))
+
+        if right_fit is not None:
+            coef_r, xs_r, ys_r = right_fit
+            arr.markers.append(points_marker(1, red, xs_r, ys_r))
+            arr.markers.append(curve_marker(
+                3, red, coef_r, (float(xs_r.min()), float(xs_r.max()))))
+        else:
+            arr.markers.append(delete_marker(1))
+            arr.markers.append(delete_marker(3))
+
+        # Centerline: midpoint of the two fitted curves, sampled across the
+        # x-range where both fits are defined.
+        if left_fit is not None and right_fit is not None:
+            xs_l = left_fit[1]
+            xs_r = right_fit[1]
+            x_lo = max(float(xs_l.min()), float(xs_r.min()))
+            x_hi = min(float(xs_l.max()), float(xs_r.max()))
+            if x_hi > x_lo:
+                xs = np.linspace(x_lo, x_hi, 40)
+                al, bl, cl = left_fit[0]
+                ar, br, cr = right_fit[0]
+                yl = al * xs * xs + bl * xs + cl
+                yr = ar * xs * xs + br * xs + cr
+                yc = 0.5 * (yl + yr)
+                m = header()
+                m.ns = 'lane_follower'
+                m.id = 4
+                m.type = Marker.LINE_STRIP
+                m.scale.x = 0.04
+                m.color = blue
+                m.points = [Point(x=float(x), y=float(y), z=0.0)
+                            for x, y in zip(xs, yc)]
+                arr.markers.append(m)
+            else:
+                arr.markers.append(delete_marker(4))
+        else:
+            arr.markers.append(delete_marker(4))
+
+        self.viz_pub.publish(arr)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = LaneFollowerNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop = AckermannDriveStamped()
+        stop.drive.speed = 0.0
+        stop.drive.steering_angle = 0.0
+        node.drive_pub.publish(stop)
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

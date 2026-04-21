@@ -42,8 +42,8 @@ bridge:
     scan_beams: 1080
 
     # map parameters (path will be resolved relative to package share directory)
-    # Use just the map name without extension, e.g., 'square', 'levine', 'Spielberg_map'
-    map_path: 'levine'
+    # Available: 'square', 'levine', 'Spielberg_map', 'oval', 'curvy', 'circuit'
+    map_path: 'circuit'
     map_img_ext: '.png'
 
     # opponent parameters
@@ -51,8 +51,8 @@ bridge:
 
     # ego starting pose on map
     sx: 0.0
-    sy: 0.0
-    stheta: 0.0
+    sy: -2.0
+    stheta: 0.0    # mid-main-straight, facing along track
 
     # opp starting pose on map
     sx1: 2.0
