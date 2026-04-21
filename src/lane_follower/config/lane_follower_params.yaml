@@ -29,3 +29,37 @@ lane_follower_node:
     speed_gain: 2.0
     max_speed: 1.0
     default_wall_dist: 2.0
+
+    # ----- advanced (fit-based) augmentation ------------------------------
+    # Master toggle — false => byte-identical eoh behavior.
+    enable_advanced: true
+
+    # Wide-sector windows (degrees, vehicle frame) used for the per-wall
+    # quadratic fit. Sign convention: +deg = left of forward.
+    left_min_deg: 30.0
+    left_max_deg: 120.0
+    right_min_deg: -120.0
+    right_max_deg: -30.0
+
+    # Fit sanity gates
+    max_range_for_fit: 10.0
+    outlier_mad_k: 2.5
+    min_points_for_fit: 10
+    fit_a_max: 20.0
+    fit_b_max: 10.0
+
+    # Multi-frame stability — direct fix for the corner-entry b-flips
+    # that broke the quadfit branch.
+    health_window: 3
+    b_stability_thresh: 1.0
+
+    # Heading feedforward — bounded perturbation, NOT primary steering
+    heading_gain: 0.15
+    heading_ff_clamp: 0.12  # rad ≈ 0.3 * max_steer
+
+    # Curvature speed cap (Pass 2 — placeholder defaults)
+    lateral_accel_limit: 2.0
+
+    # Time-constant EMA (Pass 2 — disabled when tau == 0)
+    steer_tau: 0.0
+    speed_tau: 0.0

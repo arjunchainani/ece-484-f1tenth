@@ -1,0 +1,6 @@
+image: hairpin.png
+resolution: 0.005000
+origin: [-3.015000, -1.915000, 0.000000]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196
