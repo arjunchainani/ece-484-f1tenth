@@ -6,7 +6,7 @@
 #   ./run.sh install    Install all dependencies
 #   ./run.sh build      Build ROS2 workspace
 #   ./run.sh sim        Start the simulator only
-#   ./run.sh auto       Start the autonomy stack (planning + controls)
+#   ./run.sh auto       Start the autonomy stack (lane_follower)
 #   ./run.sh all        Start simulator + autonomy stack together
 #   ./run.sh clean      Remove build artifacts
 # =============================================================================
@@ -89,16 +89,12 @@ cmd_auto() {
     check_ros
     source "$SCRIPT_DIR/install/setup.bash" 2>/dev/null || error "Workspace not built. Run './run.sh build' first."
 
-    info "Starting autonomy stack..."
-    ros2 launch planning planning_launch.py &
-    PLANNING_PID=$!
-    ros2 launch controls controls_launch.py &
-    CONTROLS_PID=$!
+    info "Starting autonomy stack (lane_follower)..."
+    ros2 launch lane_follower lane_follower_launch.py &
+    LF_PID=$!
+    info "lane_follower PID: $LF_PID"
 
-    info "Planning node PID: $PLANNING_PID"
-    info "Controls node PID: $CONTROLS_PID"
-
-    trap "kill $PLANNING_PID $CONTROLS_PID 2>/dev/null; exit" INT TERM
+    trap "kill $LF_PID 2>/dev/null; exit" INT TERM
     wait
 }
 
@@ -106,24 +102,27 @@ cmd_all() {
     check_ros
     source "$SCRIPT_DIR/install/setup.bash" 2>/dev/null || error "Workspace not built. Run './run.sh build' first."
 
-    info "Starting simulator + autonomy stack..."
+    info "Starting simulator + autonomy stack (lane_follower)..."
 
-    # Simulator
     ros2 launch f1tenth_gym_ros gym_bridge_launch.py &
     SIM_PID=$!
     info "Simulator PID: $SIM_PID"
 
-    # Wait for simulator to initialize
-    sleep 3
+    # Wait for the sim's /scan topic to come up before launching the controller,
+    # otherwise the lane_follower starts spinning on an empty subscription.
+    info "Waiting for /ego_racecar/scan..."
+    for _ in $(seq 1 20); do
+        if timeout 1 ros2 topic list 2>/dev/null | grep -q '/ego_racecar/scan'; then
+            break
+        fi
+        sleep 0.5
+    done
 
-    # Autonomy stack
-    ros2 launch planning planning_launch.py &
-    PLANNING_PID=$!
-    ros2 launch controls controls_launch.py &
-    CONTROLS_PID=$!
-    info "Planning PID: $PLANNING_PID, Controls PID: $CONTROLS_PID"
+    ros2 launch lane_follower lane_follower_launch.py &
+    LF_PID=$!
+    info "lane_follower PID: $LF_PID"
 
-    trap "kill $SIM_PID $PLANNING_PID $CONTROLS_PID 2>/dev/null; exit" INT TERM
+    trap "kill $SIM_PID $LF_PID 2>/dev/null; exit" INT TERM
     wait
 }
 
@@ -148,7 +147,7 @@ case "${1:-}" in
         echo "  install  Install all ROS2 and Python dependencies"
         echo "  build    Build the ROS2 workspace with colcon"
         echo "  sim      Start the simulator only (rviz + gym bridge)"
-        echo "  auto     Start the autonomy stack only (planning + controls)"
+        echo "  auto     Start the autonomy stack only (lane_follower)"
         echo "  all      Start simulator + autonomy stack together"
         echo "  clean    Remove build/, install/, log/ directories"
         exit 1
