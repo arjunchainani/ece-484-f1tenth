@@ -16,7 +16,7 @@ def generate_launch_description():
     control_config = os.path.join(
         package_share_dir,
         'config',
-        'control_params.yaml'
+        'controls_params.yaml'
     )
 
     planning_node = Node(
