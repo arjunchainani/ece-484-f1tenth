@@ -24,6 +24,10 @@ def generate_launch_description():
         executable='planning_node',
         name='planning_node',
         parameters=[planning_config],
+        remappings=[
+            ('/ego_racecar/odom', '/odom'),
+            ('/ego_racecar/scan', '/scan'),
+        ],
         output='screen',
     )
 
@@ -32,6 +36,10 @@ def generate_launch_description():
         executable='controls_node',
         name='controls_node',
         parameters=[control_config],
+        remappings=[
+            ('/ego_racecar/odom', '/odom'),
+            ('/ego_racecar/drive', '/drive'),
+        ],
         output='screen',
     )
 
