@@ -5,6 +5,7 @@ import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry, Path
 from ackermann_msgs.msg import AckermannDriveStamped
+from sensor_msgs.msg import Joy
 
 from .utils import quaternion_to_yaw, normalize_angle
 
@@ -33,12 +34,19 @@ class ControlsNode(Node):
         # Latest state
         self.current_odom = None
         self.current_trajectory = None
+        self.enabled = False
 
         # Subscribers
         self.odom_sub = self.create_subscription(
             Odometry, '/ego_racecar/odom', self.odom_callback, 10)
         self.trajectory_sub = self.create_subscription(
             Path, '/planning/trajectory', self.trajectory_callback, 10)
+        self.joy_sub = self.create_subscription(
+            Joy,
+            '/joy',
+            self.joy_callback,
+            10
+        )
 
         # Publisher
         self.drive_pub = self.create_publisher(
@@ -55,6 +63,11 @@ class ControlsNode(Node):
 
     def trajectory_callback(self, msg):
         self.current_trajectory = msg
+
+    def joy_callback(self, msg):
+        # Enable only while Y button is held
+        if len(msg.buttons) > 3:
+            self.enabled = (msg.buttons[3] == 1)
 
     def _extract_state(self):
         """Extract (x, y, yaw, velocity) from odometry."""
@@ -143,10 +156,16 @@ class ControlsNode(Node):
         return float(steering), float(target_speed)
 
     def control_loop(self):
-        if self.current_odom is None:
+        drive_msg = AckermannDriveStamped()
+
+        if not self.enabled:
+            drive_msg.drive.speed = 0.0
+            drive_msg.drive.steering_angle = 0.0
+            self.drive_pub.publish(drive_msg)
             return
 
-        drive_msg = AckermannDriveStamped()
+        if self.current_odom is None:
+            return
 
         if self.current_trajectory is None or len(self.current_trajectory.poses) == 0:
             # No trajectory — stop
