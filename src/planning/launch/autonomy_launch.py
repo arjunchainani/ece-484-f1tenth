@@ -38,7 +38,7 @@ def generate_launch_description():
         parameters=[control_config],
         remappings=[
             ('/ego_racecar/odom', '/odom'),
-            ('/ego_racecar/drive', '/drive'),
+            ('/ego_racecar/drive', '/ackermann_cmd'),
         ],
         output='screen',
     )
