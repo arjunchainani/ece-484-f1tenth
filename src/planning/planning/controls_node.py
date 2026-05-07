@@ -40,7 +40,7 @@ class ControlsNode(Node):
         # Subscribers
         self.scan_sub = self.create_subscription(
             LaserScan,
-            '/ego_racecar/scan',
+            '/scan',
             self.scan_callback,
             10,
         )
@@ -54,7 +54,7 @@ class ControlsNode(Node):
         # Publisher
         self.drive_pub = self.create_publisher(
             AckermannDriveStamped,
-            '/ego_racecar/drive',
+            '/ackermann_cmd',
             10,
         )
 
