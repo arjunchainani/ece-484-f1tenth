@@ -1,13 +1,11 @@
+
 import math
 
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from nav_msgs.msg import Odometry, Path
 from ackermann_msgs.msg import AckermannDriveStamped
-from sensor_msgs.msg import Joy
-
-from .utils import quaternion_to_yaw, normalize_angle
+from sensor_msgs.msg import Joy, LaserScan
 
 
 class ControlsNode(Node):
@@ -16,144 +14,205 @@ class ControlsNode(Node):
 
         # Declare parameters
         self.declare_parameter('wheelbase', 0.3302)
-        self.declare_parameter('lookahead_gain', 0.5)
-        self.declare_parameter('min_lookahead', 0.5)
-        self.declare_parameter('max_lookahead', 3.0)
         self.declare_parameter('max_steering_angle', 0.4189)
-        self.declare_parameter('max_speed', 10.0)
+        self.declare_parameter('max_speed', 1.5)
         self.declare_parameter('control_frequency', 50.0)
+        self.declare_parameter('quadratic_lookahead', 1.2)
+        self.declare_parameter('quadratic_residual_threshold', 0.25)
 
         # Read parameters
-        self.L = self.get_parameter('wheelbase').value
-        self.k_ld = self.get_parameter('lookahead_gain').value
-        self.min_ld = self.get_parameter('min_lookahead').value
-        self.max_ld = self.get_parameter('max_lookahead').value
-        self.max_steer = self.get_parameter('max_steering_angle').value
-        self.max_speed = self.get_parameter('max_speed').value
+        self.L = float(self.get_parameter('wheelbase').value)
+        self.max_steer = float(self.get_parameter('max_steering_angle').value)
+        self.max_speed = float(self.get_parameter('max_speed').value)
+        self.quad_lookahead = float(self.get_parameter('quadratic_lookahead').value)
+        self.quad_residual_threshold = float(
+            self.get_parameter('quadratic_residual_threshold').value
+        )
 
-        # Latest state
-        self.current_odom = None
-        self.current_trajectory = None
+        # Latest state. No odom and no trajectory are required.
+        self.current_scan = None
         self.enabled = False
 
+        # EOHDemo fallback PID state
+        self.prev_error = 0.0
+        self.integral_error = 0.0
+
         # Subscribers
-        self.odom_sub = self.create_subscription(
-            Odometry, '/ego_racecar/odom', self.odom_callback, 10)
-        self.trajectory_sub = self.create_subscription(
-            Path, '/planning/trajectory', self.trajectory_callback, 10)
+        self.scan_sub = self.create_subscription(
+            LaserScan,
+            '/ego_racecar/scan',
+            self.scan_callback,
+            10,
+        )
         self.joy_sub = self.create_subscription(
             Joy,
             '/joy',
             self.joy_callback,
-            10
+            10,
         )
 
         # Publisher
         self.drive_pub = self.create_publisher(
-            AckermannDriveStamped, '/ego_racecar/drive', 10)
+            AckermannDriveStamped,
+            '/ego_racecar/drive',
+            10,
+        )
 
         # Timer-based control loop
-        freq = self.get_parameter('control_frequency').value
+        freq = float(self.get_parameter('control_frequency').value)
         self.control_timer = self.create_timer(1.0 / freq, self.control_loop)
 
-        self.get_logger().info('Controls node initialized')
+        self.get_logger().info('Controls node initialized in scan-only mode')
 
-    def odom_callback(self, msg):
-        self.current_odom = msg
-
-    def trajectory_callback(self, msg):
-        self.current_trajectory = msg
+    def scan_callback(self, msg):
+        self.current_scan = msg
 
     def joy_callback(self, msg):
         # Enable only while Y button is held
         if len(msg.buttons) > 3:
             self.enabled = (msg.buttons[3] == 1)
+            if not self.enabled:
+                self.integral_error = 0.0
 
-    def _extract_state(self):
-        """Extract (x, y, yaw, velocity) from odometry."""
-        odom = self.current_odom
-        x = odom.pose.pose.position.x
-        y = odom.pose.pose.position.y
-        yaw = quaternion_to_yaw(odom.pose.pose.orientation)
-        vx = odom.twist.twist.linear.x
-        vy = odom.twist.twist.linear.y
-        vel = math.hypot(vx, vy)
-        return x, y, yaw, vel
+    def _get_index(self, scan_msg, target_angle):
+        num_rays = len(scan_msg.ranges)
+        if num_rays < 2:
+            return 0
 
-    def _find_closest_path_index(self, x, y, poses):
-        """Find index of the closest pose in the trajectory."""
-        min_dist = float('inf')
-        best_idx = 0
-        for i, pose in enumerate(poses):
-            dx = pose.pose.position.x - x
-            dy = pose.pose.position.y - y
-            d = math.hypot(dx, dy)
-            if d < min_dist:
-                min_dist = d
-                best_idx = i
-        return best_idx
+        angle_inc = (scan_msg.angle_max - scan_msg.angle_min) / (num_rays - 1)
+        idx = int((target_angle - scan_msg.angle_min) / angle_inc)
+        return max(0, min(idx, num_rays - 1))
 
-    def _pure_pursuit(self, curr_x, curr_y, curr_yaw, curr_vel, poses):
-        """Pure pursuit lateral controller with dynamic lookahead.
+    def _front_distance_speed(self, scan_msg):
+        rays = np.array(scan_msg.ranges)
+        idx_left = self._get_index(scan_msg, np.radians(10))
+        idx_right = self._get_index(scan_msg, np.radians(-10))
+        lo = min(idx_left, idx_right)
+        hi = max(idx_left, idx_right)
 
-        Ported from MP2 controller.py:179-234, adapted for F1Tenth.
+        front_cone = rays[lo:hi + 1]
+        valid_front = front_cone[np.isfinite(front_cone) & (front_cone > 0.0)]
 
-        Returns:
-            (steering_angle, target_speed)
+        if len(valid_front) == 0:
+            return 0.0
+
+        front_dist = float(np.min(valid_front))
+        return max(0.0, min(front_dist * 2.0, self.max_speed))
+
+    def _quadratic_wall_fit_policy(self, scan_msg):
+        """Fit left/right walls in LiDAR frame and steer toward their centerline.
+
+        Falls back to EOHDemo when there are not enough points or the quadratic
+        fit residual is poor.
         """
-        if not poses:
-            return 0.0, 0.0
+        rays = np.array(scan_msg.ranges)
+        num_rays = len(rays)
+        if num_rays < 10:
+            return self._eoh_lidar_fallback(scan_msg)
 
-        # Dynamic lookahead distance
-        ld_des = np.clip(self.k_ld * curr_vel + self.min_ld, self.min_ld, self.max_ld)
+        angles = scan_msg.angle_min + np.arange(num_rays) * scan_msg.angle_increment
+        valid = (
+            np.isfinite(rays)
+            & (rays > scan_msg.range_min)
+            & (rays < scan_msg.range_max)
+        )
 
-        # Find lookahead point via circle-line intersection
-        curr_pos = np.array([curr_x, curr_y])
-        lookahead_point = np.array([
-            poses[-1].pose.position.x, poses[-1].pose.position.y
-        ])
-        lookahead_vel = poses[-1].pose.position.z
+        x = rays[valid] * np.cos(angles[valid])
+        y = rays[valid] * np.sin(angles[valid])
 
-        for i in range(len(poses) - 1):
-            p1 = np.array([poses[i].pose.position.x, poses[i].pose.position.y])
-            p2 = np.array([poses[i + 1].pose.position.x, poses[i + 1].pose.position.y])
+        # Only use points in front of the car.
+        forward = (x > 0.2) & (x < 4.0)
+        x = x[forward]
+        y = y[forward]
 
-            d = p2 - p1
-            f = p1 - curr_pos
+        left = y > 0.15
+        right = y < -0.15
 
-            a = np.dot(d, d)
-            b_coeff = 2.0 * np.dot(f, d)
-            c = np.dot(f, f) - ld_des ** 2
+        if np.count_nonzero(left) < 8 or np.count_nonzero(right) < 8:
+            return self._eoh_lidar_fallback(scan_msg)
 
-            discriminant = b_coeff ** 2 - 4.0 * a * c
-            if discriminant >= 0 and a > 1e-8:
-                sqrt_disc = np.sqrt(discriminant)
-                t2 = (-b_coeff + sqrt_disc) / (2.0 * a)
+        try:
+            left_fit = np.polyfit(x[left], y[left], 2)
+            right_fit = np.polyfit(x[right], y[right], 2)
+        except Exception:
+            return self._eoh_lidar_fallback(scan_msg)
 
-                if 0.0 <= t2 <= 1.0:
-                    lookahead_point = p1 + t2 * d
-                    # Interpolate velocity
-                    v1 = poses[i].pose.position.z
-                    v2 = poses[i + 1].pose.position.z
-                    lookahead_vel = v1 + t2 * (v2 - v1)
-                    break
+        left_pred = np.polyval(left_fit, x[left])
+        right_pred = np.polyval(right_fit, x[right])
+        left_rmse = float(np.sqrt(np.mean((left_pred - y[left]) ** 2)))
+        right_rmse = float(np.sqrt(np.mean((right_pred - y[right]) ** 2)))
 
-        # Compute steering angle
-        dx = lookahead_point[0] - curr_x
-        dy = lookahead_point[1] - curr_y
-        ld = math.hypot(dx, dy)
-        if ld < 0.1:
-            ld = 0.1
+        if max(left_rmse, right_rmse) > self.quad_residual_threshold:
+            return self._eoh_lidar_fallback(scan_msg)
 
-        target_yaw = math.atan2(dy, dx)
-        alpha = normalize_angle(target_yaw - curr_yaw)
+        lookahead_x = self.quad_lookahead
+        left_y = float(np.polyval(left_fit, lookahead_x))
+        right_y = float(np.polyval(right_fit, lookahead_x))
+        center_y = 0.5 * (left_y + right_y)
+
+        left_slope = 2.0 * left_fit[0] * lookahead_x + left_fit[1]
+        right_slope = 2.0 * right_fit[0] * lookahead_x + right_fit[1]
+        center_slope = 0.5 * (left_slope + right_slope)
+
+        target_yaw = math.atan2(center_y, lookahead_x)
+        path_yaw = math.atan(center_slope)
+        alpha = 0.7 * target_yaw + 0.3 * path_yaw
+        ld = max(math.hypot(lookahead_x, center_y), 0.1)
 
         steering = math.atan2(2.0 * self.L * math.sin(alpha), ld)
-        steering = np.clip(steering, -self.max_steer, self.max_steer)
+        steering = float(np.clip(steering, -self.max_steer, self.max_steer))
 
-        target_speed = np.clip(lookahead_vel, 0.0, self.max_speed)
+        speed = self._front_distance_speed(scan_msg)
+        return steering, speed
 
-        return float(steering), float(target_speed)
+    def _eoh_lidar_fallback(self, scan_msg):
+        """LiDAR-only EOHDemo fallback."""
+        rays = np.array(scan_msg.ranges)
+        num_rays = len(rays)
+        if num_rays < 2:
+            return 0.0, 0.0
+
+        min_angle = float(scan_msg.angle_min)
+        max_angle = float(scan_msg.angle_max)
+        angle_inc = (max_angle - min_angle) / (num_rays - 1)
+
+        def get_index(target_angle):
+            idx = int((target_angle - min_angle) / angle_inc)
+            return max(0, min(idx, num_rays - 1))
+
+        speed = self._front_distance_speed(scan_msg)
+
+        window = 5
+        idx_left = get_index(np.radians(60))
+        idx_right = get_index(-np.radians(60))
+
+        left_window = rays[max(0, idx_left - window):min(num_rays, idx_left + window + 1)]
+        right_window = rays[max(0, idx_right - window):min(num_rays, idx_right + window + 1)]
+
+        valid_left = left_window[np.isfinite(left_window) & (left_window > 0.0)]
+        valid_right = right_window[np.isfinite(right_window) & (right_window > 0.0)]
+
+        dist_left = np.mean(valid_left) if len(valid_left) > 0 else 2.0
+        dist_right = np.mean(valid_right) if len(valid_right) > 0 else 2.0
+
+        error = dist_left - dist_right
+
+        kp_steer = 0.6
+        ki_steer = 0.005
+        kd_steer = 0.2
+
+        p_term = kp_steer * error
+        self.integral_error += error
+        self.integral_error = max(-20.0, min(self.integral_error, 20.0))
+        i_term = ki_steer * self.integral_error
+        derivative = error - self.prev_error
+        d_term = kd_steer * derivative
+        self.prev_error = error
+
+        steering = p_term + i_term + d_term
+        steering = float(np.clip(steering, -self.max_steer, self.max_steer))
+
+        return steering, speed
 
     def control_loop(self):
         drive_msg = AckermannDriveStamped()
@@ -164,33 +223,34 @@ class ControlsNode(Node):
             self.drive_pub.publish(drive_msg)
             return
 
-        if self.current_odom is None:
-            return
-
-        if self.current_trajectory is None or len(self.current_trajectory.poses) == 0:
-            # No trajectory — stop
+        if self.current_scan is None:
             drive_msg.drive.speed = 0.0
             drive_msg.drive.steering_angle = 0.0
-        else:
-            curr_x, curr_y, curr_yaw, curr_vel = self._extract_state()
-            poses = self.current_trajectory.poses
+            self.drive_pub.publish(drive_msg)
+            return
 
-            steering, speed = self._pure_pursuit(
-                curr_x, curr_y, curr_yaw, curr_vel, poses
-            )
-
-            drive_msg.drive.speed = speed
-            drive_msg.drive.steering_angle = steering
-
+        steering, speed = self._quadratic_wall_fit_policy(self.current_scan)
+        drive_msg.drive.speed = speed
+        drive_msg.drive.steering_angle = steering
         self.drive_pub.publish(drive_msg)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = ControlsNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_msg = AckermannDriveStamped()
+        stop_msg.drive.speed = 0.0
+        stop_msg.drive.steering_angle = 0.0
+        node.drive_pub.publish(stop_msg)
+
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
