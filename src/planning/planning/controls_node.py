@@ -29,8 +29,7 @@ class ControlsNode(Node):
             self.get_parameter('quadratic_residual_threshold').value
         )
 
-        # Latest state. No odom and no trajectory are required.
-        self.current_scan = None
+        # Enable gate matches EOHDemo: drive only while the Y button is held.
         self.enabled = False
 
         # EOHDemo fallback PID state
@@ -58,14 +57,20 @@ class ControlsNode(Node):
             10,
         )
 
-        # Timer-based control loop
-        freq = float(self.get_parameter('control_frequency').value)
-        self.control_timer = self.create_timer(1.0 / freq, self.control_loop)
-
         self.get_logger().info('Controls node initialized in scan-only mode')
 
     def scan_callback(self, msg):
-        self.current_scan = msg
+        if not self.enabled:
+            return
+
+        steering, speed = self._quadratic_wall_fit_policy(msg)
+
+        drive_msg = AckermannDriveStamped()
+        drive_msg.header.stamp = self.get_clock().now().to_msg()
+        drive_msg.header.frame_id = 'base_link'
+        drive_msg.drive.speed = speed
+        drive_msg.drive.steering_angle = steering
+        self.drive_pub.publish(drive_msg)
 
     def joy_callback(self, msg):
         # Enable only while Y button is held
@@ -213,27 +218,6 @@ class ControlsNode(Node):
         steering = float(np.clip(steering, -self.max_steer, self.max_steer))
 
         return steering, speed
-
-    def control_loop(self):
-        drive_msg = AckermannDriveStamped()
-
-        if not self.enabled:
-            drive_msg.drive.speed = 0.0
-            drive_msg.drive.steering_angle = 0.0
-            self.drive_pub.publish(drive_msg)
-            return
-
-        if self.current_scan is None:
-            drive_msg.drive.speed = 0.0
-            drive_msg.drive.steering_angle = 0.0
-            self.drive_pub.publish(drive_msg)
-            return
-
-        steering, speed = self._quadratic_wall_fit_policy(self.current_scan)
-        drive_msg.drive.speed = speed
-        drive_msg.drive.steering_angle = steering
-        self.drive_pub.publish(drive_msg)
-
 
 def main(args=None):
     rclpy.init(args=args)
