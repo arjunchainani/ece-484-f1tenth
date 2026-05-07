@@ -2,6 +2,7 @@ import os
 import math
 import copy
 import threading
+import traceback
 
 import numpy as np
 import rclpy
@@ -62,6 +63,8 @@ class PlanningNode(Node):
 
         # Latest odometry
         self.current_odom = None
+        self._got_odom_log = False
+        self._published_trajectory_log = False
 
         # Subscribers
         self.odom_sub = self.create_subscription(
@@ -97,6 +100,7 @@ class PlanningNode(Node):
             )
         except Exception as e:
             self.get_logger().error(f'Raceline generation failed: {e}')
+            self.get_logger().error(traceback.format_exc())
             return
 
         self.centerline = centerline
@@ -137,6 +141,9 @@ class PlanningNode(Node):
 
     def odom_callback(self, msg):
         self.current_odom = msg
+        if not self._got_odom_log:
+            self.get_logger().info('Received first odometry message')
+            self._got_odom_log = True
 
     def scan_callback(self, msg):
         pass  # Reserved for future perception integration
@@ -273,7 +280,18 @@ class PlanningNode(Node):
         return velocities
 
     def plan_callback(self):
-        if self.current_odom is None or self.raceline is None:
+        if self.current_odom is None:
+            self.get_logger().warn(
+                'Waiting for /odom before publishing trajectory',
+                throttle_duration_sec=2.0
+            )
+            return
+
+        if self.raceline is None:
+            self.get_logger().warn(
+                'Waiting for raceline generation before publishing trajectory',
+                throttle_duration_sec=2.0
+            )
             return
 
         curr_x, curr_y, curr_yaw, curr_vel = self._extract_state()
@@ -310,6 +328,9 @@ class PlanningNode(Node):
             path.poses.append(pose)
 
         self.trajectory_pub.publish(path)
+        if not self._published_trajectory_log:
+            self.get_logger().info(f'Published first trajectory with {len(path.poses)} poses')
+            self._published_trajectory_log = True
 
 
 def main(args=None):
