@@ -42,17 +42,17 @@ bridge:
     scan_beams: 1080
 
     # map parameters (path will be resolved relative to package share directory)
-    # Available: 'square', 'levine', 'Spielberg_map', 'oval', 'curvy', 'circuit', 'hairpin', 'snake', 'pocket'
-    map_path: 'pocket'
+    # Available: 'square', 'levine', 'Spielberg_map', 'oval', 'curvy', 'circuit', 'hairpin', 'snake', 'pocket', 'photo_track'
+    map_path: 'photo_track'
     map_img_ext: '.png'
 
     # opponent parameters
     num_agent: 1
 
     # ego starting pose on map
-    sx: 0.0
-    sy: -2.5
-    stheta: 0.0    # mid bottom straight, facing east (pocket map)
+    sx: 4.023
+    sy: 4.938
+    stheta: -1.5708    # checkered start line, heading down-track (photo_track)
 
     # opp starting pose on map
     sx1: 2.0

@@ -69,7 +69,7 @@ The simulator map and spawn pose are configured in `src/f1tenth_simulator/f1tent
 
 The `map_path` and spawn pose (`sx`, `sy`, `stheta`) in `planning_params.yaml` should match `sim.yaml`.
 
-Available maps: `levine`, `Spielberg_map`, `square`.
+Available maps: `levine`, `Spielberg_map`, `square`, `oval`, `curvy`, `circuit`, `hairpin`, `snake`, `pocket`, `photo_track`.
 
 ## Package Structure
 

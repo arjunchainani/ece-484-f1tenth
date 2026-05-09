@@ -1,15 +1,15 @@
 planning_node:
   ros__parameters:
     # Map (should match sim.yaml)
-    map_path: 'levine'
+    map_path: 'photo_track'
     map_img_ext: '.png'
     waypoint_spacing: 0.2
     vehicle_width: 0.31
 
     # Spawn pose (should match sim.yaml)
-    sx: 0.0
-    sy: 0.0
-    stheta: 0.0
+    sx: 4.023
+    sy: 4.938
+    stheta: -1.5708
 
     # Velocity planner
     v_max: 10.0
